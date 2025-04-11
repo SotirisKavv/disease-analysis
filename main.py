@@ -1,105 +1,104 @@
-from openai import OpenAI
 import streamlit as st
-import yfinance as yf
+from openai import OpenAI
+import json
 import pandas as pd
 
+# Setup OpenAI client
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# Set up OpenAI API key
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-POPULAR_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NFLX", "META", "NVDA"]
-
-def get_stock_data(ticker, start_date='2024-01-01', end_date='2024-02-01'):
-    stock_data = yf.download(ticker, start=start_date, end=end_date)
-    return stock_data
-
-def get_ticker_data(ticker, data):
-    return data.xs(ticker, level=1, axis=1)
-
-def get_summary(tickers_data):
-    SYSTEM_MSG = """
-                You are a financial assistant that will retrieve multiple tables of financial market data and will summarize 
-                the comparative performance in text, in full detail with highlights for each stock and also a conclusion 
-                with a markdown output. BE VERY STRICT ON YOUR OUTPUT
-            """
-    CONTENT_MSG = ""
-    tickers = tickers_data.columns.get_level_values(1).unique()
-    if len(tickers) == 1:
-        return "Please select at least two stock tickers for comparison."
-    else: 
-        for ticker in tickers:
-            stock_data = tickers_data.xs(ticker, level=1, axis=1)
-            CONTENT_MSG += f"This is the {ticker} stock data : {stock_data}."
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": SYSTEM_MSG},
-                    {"role": "user", "content": CONTENT_MSG}
-                ] 
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"Error getting summary from OpenAI: {e}"
-
-# Streamlit app setup
-st.title("📊 Financial Market Analysis")
-
-# Sidebar options
-st.sidebar.header("Options")
-
-# Set tickers
-st.sidebar.subheader("Stock Tickers")
-tickers = st.sidebar.multiselect("Select Stock Tickers", POPULAR_TICKERS, default=POPULAR_TICKERS[:2], max_selections=4)
-if len(tickers) < 4:
-    input_ticker = st.sidebar.text_input("Or enter custom stock ticker (comma-separated)").upper()
-    if input_ticker:
-        tickers += [ticker.strip() for ticker in input_ticker.split(",") if ticker.strip() not in tickers]
-        if len(tickers) > 4:
-            st.sidebar.warning("You can only select up to 4 tickers.")
-        tickers = tickers[:4]  # Limit to 4 tickers
-if len(tickers) == 0:
-    st.sidebar.error("Please select at least one stock ticker.")
+def get_disease_info(disease_name):
+    medication_format = """
+    "name":"",
+    "side_effects":[
+        0: {"name": "", "description": "", "rating": ""},
+        1: {"name": "", "description": "", "rating": ""},
+        ...    
+    ],
+    "dosage":""
+    """
     
-# Set date range
-st.sidebar.subheader("Date Range")
-side_cols = st.sidebar.columns(2)
-with side_cols[0]:
-    start_date = side_cols[0].date_input("Start Date", value=pd.to_datetime('2025-01-01'))
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+             {"role": "system", 
+              "content": 
+                f"""Please provide information on the following aspects for {disease_name}: 
+                    1. Key Statistics, 
+                    2. Recovery Options, 
+                    3. Recommended Medications. 
+                    Format the response in JSON with keys for 'name', 'statistics', 'total_cases' (this always has to be a number), 
+                    'recovery_rate' (this always has to be a percentage), 'mortality_rate' (this always has to be a percentage),
+                    'recovery_options' (explain each recovery option in detail), and 'medication' (make it a list and give some side 
+                    effect examples and dosages for each). Regarding the side effects, provide a small description and a rating on the 
+                    scale ("mild", "moderate", "severe"). Always use this json format for medication : {medication_format} .Return only 
+                    raw valid JSON. Do not wrap it in backticks or markdown formatting. All numbers must be actual numeric values 
+                    (e.g., 463000000, not "463 million")."""
+            }
+        ],
+    )
     
-with side_cols[1]:
-    end_date = side_cols[1].date_input("End Date", value=pd.to_datetime('2025-02-01'))
-if start_date > end_date:
-    st.sidebar.error("Start date must be before end date.")
+    return response.choices[0].message.content
 
-# Get stock data
-st_data = pd.DataFrame()
-if len(tickers) > 0 and start_date < end_date:
-    st_data = get_stock_data(tickers, start_date=str(start_date), end_date=str(end_date))
+def display_disease_info(disease_info):
+    try:
+        # Parse the JSON response
+        # print(repr(disease_info))
+        info = json.loads(disease_info)
+        
+        recovery_rate = float(info['statistics']['recovery_rate'])
+        mortality_rate = float(info['statistics']['mortality_rate'])
+        
+        chart_data = pd.DataFrame(
+            {
+                "Recovery Rate": [recovery_rate],
+                "Mortality Rate": [mortality_rate],
+            },
+            index=["Rate"]
+        )
+        
+        # Display key statistics
+        st.write(f"### Statistics for {info['name']}")
+        st.bar_chart(chart_data, stack=False)
+        
+        ro_tab, med_tab = st.tabs(["Recovery Options", "Medications"])
+        with ro_tab:
+            # Display Recovery Options
+            st.write("## Recovery Options")
+            recovery_options = info['recovery_options']
+            for option, recovery in recovery_options.items():
+                st.subheader(option.replace("_", " ").title())
+                st.write(recovery)
+            
+        with med_tab:
+            # Display Medications
+            st.write("## Medications")
+            medication_info = info['medication']
+            for medication in medication_info:
+                with st.expander(medication['name'], expanded=False):
+                    with st.container():
+                        st.write(f"### {medication['name']}")
+                        st.write(f"💊 **Dosage:** {medication['dosage']}")
+                        st.write("⚠️ **Side Effects:**")
+                        for side_effect in medication['side_effects']:
+                            st.write(f"- **{side_effect['name']} ({side_effect['rating']})**")
+                            st.write(f"_{side_effect['description']}_")
+        
+        st.write(f"[Read more on WHO](https://www.who.int/news-room/fact-sheets/detail/{info['name'].replace(' ', '-').lower()})")
+            
+    except json.JSONDecodeError as e:
+        st.error(f"Failed to decode the response into JSON. Please check the format of the OpenAI response. {e}")
+            
+        
 
-st.sidebar.subheader("Chart Type")
-chart_type = st.sidebar.selectbox("Select Chart Type for tickers", ["Line", "Bar"])
 
-# Main content area
-if not st_data.empty:
-    tick_tabs = st.tabs(tickers)
-    for i, ticker in zip(range(len(tickers)), tickers):
-        with tick_tabs[i]:
-            st.subheader(f"Displaying Data for {ticker}")
-            ticker_data = get_ticker_data(ticker, st_data)
-            st.write(ticker_data)
+# Title of the app
+st.title("Disease Information Dashboard")
 
-    st.subheader("Stock Price Chart")      
-    if chart_type == "Line":
-        st.line_chart(st_data['Close'])
-    elif chart_type == "Bar":
-        st.bar_chart(st_data['Close'], stack=False)
-else:
-    st.warning("Please select at least one stock ticker or make sure that the dates are correct.")
-    
-# Summary button
-if st.button("Comparative Performance") and tickers:
-    with st.spinner("Generating summary..."):
-        summary = get_summary(st_data)
-        st.markdown(summary)
+disease_name = st.text_input("Enter a disease name")
+
+if disease_name:
+    # Get disease information
+    with st.spinner("Fetching disease information..."):
+        disease_info = get_disease_info(disease_name)
+        # st.write(disease_info)
+        display_disease_info(disease_info)
